@@ -18,6 +18,7 @@ from vault.storage import (
     VAULT_VERSION,
 )
 from vault.secure_mem import SecureBuffer, zero_memory
+from vault.pwned import check_password_leak
 
 __all__ = [
     "VaultStorage",
@@ -29,6 +30,7 @@ __all__ = [
     "decrypt_bytes",
     "SecureBuffer",
     "zero_memory",
+    "check_password_leak",
     "MAGIC_BYTES",
     "VAULT_VERSION",
 ]

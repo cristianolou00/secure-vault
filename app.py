@@ -5,16 +5,21 @@ Gestor Profissional de Credenciais e Ficheiros Criptografados
 Funcionalidades Comerciais:
 1. Gestão de Credenciais (Logins, Chaves, Cartões, Notas)
 2. Ficheiros Seguros (Encriptação e armazenamento de ficheiros/PDFs/imagens)
-3. Auditoria de Segurança (Detetor de senhas fracas e repetidas + Health Score)
-4. Gerador Criptográfico com cálculo de entropia
-5. Definições: Mudança de Senha Mestre, Exportação/Importação CSV e Backups
+3. Auditoria de Segurança:
+   - Detetor de senhas fracas e repetidas
+   - Verificação de senhas vazadas na internet com k-Anonymity (HaveIBeenPwned)
+   - Health Score dinâmico (0 a 100%)
+4. Bloqueio Automático por Inatividade (Auto-Lock configurável)
+5. Gerador Criptográfico com cálculo de entropia
+6. Definições: Mudança de Senha Mestre, Exportação/Importação CSV e Backups
 """
 
 import os
 import sys
+import time
 import threading
 import webbrowser
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 import customtkinter as ctk
 from tkinter import messagebox, filedialog
@@ -26,6 +31,7 @@ from vault.generator import generate_password, calculate_entropy
 from vault.audit import audit_vault, AuditReport
 from vault.file_crypto import VaultFileAttachment, format_file_size
 from vault.backup import export_entries_to_csv, import_entries_from_csv, change_master_password
+from vault.pwned import check_password_leak
 
 # Configuração visual do CustomTkinter
 ctk.set_appearance_mode("Dark")
@@ -232,29 +238,63 @@ class SecureVaultApp(ctk.CTk):
         self.clipboard_clear_timer: Optional[threading.Timer] = None
         self.current_nav = "credentials"
 
+        # Sistema de Bloqueio Automático por Inatividade (Auto-Lock)
+        self.auto_lock_minutes = 5  # 5 minutos padrão (0 = desativado)
+        self.last_activity_time = time.time()
+        self._setup_activity_listeners()
+
         self.container = ctk.CTkFrame(self, fg_color="transparent")
         self.container.pack(fill="both", expand=True)
 
         self._show_unlock_screen()
+        # Iniciar ciclo de verificação de inatividade
+        self._check_idle_timeout()
+
+    # -------------------------------------------------------------
+    # SISTEMA DE AUTO-LOCK POR INATIVIDADE
+    # -------------------------------------------------------------
+    def _setup_activity_listeners(self):
+        """Monitoriza eventos de rato e teclado em toda a aplicação para reiniciar o cronómetro."""
+        self.bind_all("<Key>", self._on_user_interaction, add="+")
+        self.bind_all("<Button>", self._on_user_interaction, add="+")
+        self.bind_all("<Motion>", self._on_user_interaction, add="+")
+
+    def _on_user_interaction(self, event=None):
+        """Atualiza o timestamp da última atividade do utilizador."""
+        self.last_activity_time = time.time()
+
+    def _check_idle_timeout(self):
+        """Verifica periodicamente se o tempo limite de inatividade foi ultrapassado."""
+        if self.master_password is not None and self.auto_lock_minutes > 0:
+            idle_seconds = time.time() - self.last_activity_time
+            if idle_seconds >= (self.auto_lock_minutes * 60):
+                self._lock_vault(reason="Cofre bloqueado automaticamente por inatividade.")
+                return
+
+        # Verifica novamente a cada 5 segundos
+        self.after(5000, self._check_idle_timeout)
 
     # -------------------------------------------------------------
     # ECRÃ 1: AUTENTICAÇÃO / DESBLOQUEIO
     # -------------------------------------------------------------
-    def _show_unlock_screen(self):
+    def _show_unlock_screen(self, notice_msg: str = ""):
         for widget in self.container.winfo_children():
             widget.destroy()
 
-        center_card = ctk.CTkFrame(self.container, corner_radius=18, width=460, height=520)
+        center_card = ctk.CTkFrame(self.container, corner_radius=18, width=460, height=530)
         center_card.place(relx=0.5, rely=0.5, anchor="center")
 
-        ctk.CTkLabel(center_card, text="🛡️", font=ctk.CTkFont(size=52)).pack(pady=(35, 5))
+        ctk.CTkLabel(center_card, text="🛡️", font=ctk.CTkFont(size=52)).pack(pady=(30, 5))
         ctk.CTkLabel(center_card, text="SecureVault", font=ctk.CTkFont(size=28, weight="bold")).pack()
         ctk.CTkLabel(
             center_card,
             text="Padrão Militar AES-256-GCM + KDF Argon2id (64MB RAM)\n100% Offline e Privado no teu Computador",
             font=ctk.CTkFont(size=12),
             text_color="gray"
-        ).pack(pady=(4, 25))
+        ).pack(pady=(4, 20))
+
+        if notice_msg:
+            ctk.CTkLabel(center_card, text=f"ℹ️ {notice_msg}", font=ctk.CTkFont(size=11, weight="bold"), text_color="#F59E0B").pack(pady=(0, 10))
 
         file_exists = os.path.exists(self.vault_path)
         status_text = f"Ficheiro: {self.vault_path}" if file_exists else f"Novo Cofre a Criar: {self.vault_path}"
@@ -328,6 +368,7 @@ class SecureVaultApp(ctk.CTk):
             self.vault_data = data
             self.entries = [VaultEntry.from_dict(v) for v in data.get("entries", {}).values()]
             self.files = [VaultFileAttachment.from_dict(f) for f in data.get("files", {}).values()]
+            self.last_activity_time = time.time()
 
             self.after(0, self._show_main_interface)
         except DecryptionError:
@@ -358,7 +399,7 @@ class SecureVaultApp(ctk.CTk):
         nav_items = [
             ("credentials", "🔑 Credenciais"),
             ("files", "📁 Ficheiros Seguros"),
-            ("audit", "🛡️ Auditoria"),
+            ("audit", "🛡️ Auditoria & Fugas"),
             ("generator", "⚡ Gerador"),
             ("settings", "⚙️ Definições"),
         ]
@@ -500,11 +541,13 @@ class SecureVaultApp(ctk.CTk):
         content = ctk.CTkScrollableFrame(self.details_pane, fg_color="transparent")
         content.pack(fill="both", expand=True, padx=25, pady=25)
 
+        # Cabeçalho
         h_row = ctk.CTkFrame(content, fg_color="transparent")
         h_row.pack(fill="x", pady=(0, 15))
         ctk.CTkLabel(h_row, text=entry.title, font=ctk.CTkFont(size=24, weight="bold")).pack(side="left")
         ctk.CTkLabel(h_row, text=f"Categoria: {entry.category}", font=ctk.CTkFont(size=12), text_color="#38BDF8").pack(side="right")
 
+        # Utilizador
         ctk.CTkLabel(content, text="UTILIZADOR / EMAIL", font=ctk.CTkFont(size=11, weight="bold"), text_color="gray").pack(anchor="w", pady=(10, 2))
         u_frame = ctk.CTkFrame(content)
         u_frame.pack(fill="x", pady=(0, 10))
@@ -512,6 +555,7 @@ class SecureVaultApp(ctk.CTk):
         if entry.username:
             ctk.CTkButton(u_frame, text="Copiar", width=70, height=28, command=lambda: self._copy_to_clipboard(entry.username, "Utilizador")).pack(side="right", padx=8)
 
+        # Senha
         ctk.CTkLabel(content, text="PALAVRA-PASSE", font=ctk.CTkFont(size=11, weight="bold"), text_color="gray").pack(anchor="w", pady=(10, 2))
         p_frame = ctk.CTkFrame(content)
         p_frame.pack(fill="x", pady=(0, 10))
@@ -531,9 +575,41 @@ class SecureVaultApp(ctk.CTk):
         rev_btn = ctk.CTkButton(p_frame, text="Mostrar", width=75, height=28, command=toggle_mask)
         rev_btn.pack(side="right", padx=4)
 
+        # Entropia da Senha
         entropy, rating, color = calculate_entropy(entry.password)
-        ctk.CTkLabel(content, text=f"Força da Senha: {rating} ({entropy:.1f} bits de entropia)", font=ctk.CTkFont(size=11, weight="bold"), text_color=color).pack(anchor="w", pady=(0, 15))
+        ctk.CTkLabel(content, text=f"Força da Senha: {rating} ({entropy:.1f} bits de entropia)", font=ctk.CTkFont(size=11, weight="bold"), text_color=color).pack(anchor="w", pady=(0, 6))
 
+        # -------------------------------------------------------------
+        # VERIFICAÇÃO DE FUGAS (k-Anonymity / HaveIBeenPwned)
+        # -------------------------------------------------------------
+        leak_box = ctk.CTkFrame(content, corner_radius=8)
+        leak_box.pack(fill="x", pady=(0, 15))
+
+        leak_status_lbl = ctk.CTkLabel(leak_box, text="Verificação de Fugas Públicas (k-Anonymity): Não testada", font=ctk.CTkFont(size=11), text_color="gray")
+        leak_status_lbl.pack(side="left", padx=12, pady=8)
+
+        def run_single_leak_check():
+            leak_check_btn.configure(state="disabled")
+            leak_status_lbl.configure(text="A consultar HaveIBeenPwned via k-Anonymity...", text_color="#38BDF8")
+
+            def bg_check():
+                leaked, count = check_password_leak(entry.password)
+                def update_ui():
+                    leak_check_btn.configure(state="normal")
+                    if count == -1:
+                        leak_status_lbl.configure(text="⚠️ Sem ligação à internet para verificação de fugas.", text_color="#F59E0B")
+                    elif leaked:
+                        leak_status_lbl.configure(text=f"🚨 FUGA DETETADA: Esta senha apareceu em {count:,} fugas públicas!", text_color="#EF4444")
+                    else:
+                        leak_status_lbl.configure(text="✅ Segura: Nenhuma fuga pública conhecida para esta senha.", text_color="#10B981")
+                self.after(0, update_ui)
+
+            threading.Thread(target=bg_check, daemon=True).start()
+
+        leak_check_btn = ctk.CTkButton(leak_box, text="🔍 Testar Fuga", width=110, height=26, font=ctk.CTkFont(size=11), command=run_single_leak_check)
+        leak_check_btn.pack(side="right", padx=8, pady=6)
+
+        # URL
         if entry.url:
             ctk.CTkLabel(content, text="URL / WEBSITE", font=ctk.CTkFont(size=11, weight="bold"), text_color="gray").pack(anchor="w", pady=(10, 2))
             url_frame = ctk.CTkFrame(content)
@@ -541,6 +617,7 @@ class SecureVaultApp(ctk.CTk):
             ctk.CTkLabel(url_frame, text=entry.url, font=ctk.CTkFont(size=13), text_color="#60A5FA").pack(side="left", padx=12, pady=8)
             ctk.CTkButton(url_frame, text="Abrir Link", width=80, height=28, command=lambda: webbrowser.open(entry.url)).pack(side="right", padx=8)
 
+        # Notas
         if entry.notes:
             ctk.CTkLabel(content, text="NOTAS CONFIDENCIAIS", font=ctk.CTkFont(size=11, weight="bold"), text_color="gray").pack(anchor="w", pady=(10, 2))
             notes_box = ctk.CTkTextbox(content, height=90)
@@ -551,6 +628,7 @@ class SecureVaultApp(ctk.CTk):
         self.copy_feedback = ctk.CTkLabel(content, text="", font=ctk.CTkFont(size=12))
         self.copy_feedback.pack(pady=5)
 
+        # Ações
         a_row = ctk.CTkFrame(content, fg_color="transparent")
         a_row.pack(fill="x", pady=(15, 0))
         ctk.CTkButton(a_row, text="✏️ Editar Credencial", width=150, command=lambda: self._open_edit_dialog(entry)).pack(side="left")
@@ -638,7 +716,7 @@ class SecureVaultApp(ctk.CTk):
         self._navigate_to("files")
 
     # -------------------------------------------------------------
-    # SECÇÃO 3: AUDITORIA DE SEGURANÇA
+    # SECÇÃO 3: AUDITORIA DE SEGURANÇA E FUGAS ONLINE
     # -------------------------------------------------------------
     def _render_audit_view(self):
         report: AuditReport = audit_vault(self.entries)
@@ -646,9 +724,10 @@ class SecureVaultApp(ctk.CTk):
         scroll = ctk.CTkScrollableFrame(self.main_content, fg_color="transparent")
         scroll.pack(fill="both", expand=True, padx=25, pady=20)
 
-        ctk.CTkLabel(scroll, text="🛡️ Auditoria de Saúde de Segurança", font=ctk.CTkFont(size=22, weight="bold")).pack(anchor="w", pady=(0, 5))
-        ctk.CTkLabel(scroll, text="Análise em tempo real de senhas fracas, reutilizadas e vulnerabilidades.", font=ctk.CTkFont(size=12), text_color="gray").pack(anchor="w", pady=(0, 20))
+        ctk.CTkLabel(scroll, text="🛡️ Auditoria de Segurança & Fugas Online", font=ctk.CTkFont(size=22, weight="bold")).pack(anchor="w", pady=(0, 5))
+        ctk.CTkLabel(scroll, text="Análise local de vulnerabilidades + Verificação anónima HaveIBeenPwned (k-Anonymity).", font=ctk.CTkFont(size=12), text_color="gray").pack(anchor="w", pady=(0, 20))
 
+        # Cartão de Pontuação de Saúde
         score_card = ctk.CTkFrame(scroll, corner_radius=12)
         score_card.pack(fill="x", pady=(0, 20))
 
@@ -657,10 +736,73 @@ class SecureVaultApp(ctk.CTk):
 
         score_info = ctk.CTkFrame(score_card, fg_color="transparent")
         score_info.pack(side="left", fill="x", expand=True, pady=15)
-        status_title = "Excelente Proteção!" if report.health_score >= 80 else "Atenção: Existem Riscos de Segurança" if report.health_score >= 50 else "Cofre Vulnerável!"
+        status_title = "Excelente Proteção!" if report.health_score >= 80 else "Atenção: Riscos de Segurança Detetados" if report.health_score >= 50 else "Cofre Vulnerável!"
         ctk.CTkLabel(score_info, text=status_title, font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w")
-        ctk.CTkLabel(score_info, text=f"Total de Credenciais: {report.total_entries} | Fracas: {report.total_weak} | Repetidas: {report.total_reused}", text_color="gray", font=ctk.CTkFont(size=12)).pack(anchor="w")
+        ctk.CTkLabel(score_info, text=f"Total: {report.total_entries} | Fracas: {report.total_weak} | Repetidas: {report.total_reused}", text_color="gray", font=ctk.CTkFont(size=12)).pack(anchor="w")
 
+        # -------------------------------------------------------------
+        # AUDITORIA GLOBAL DE FUGAS (k-Anonymity)
+        # -------------------------------------------------------------
+        leak_audit_card = ctk.CTkFrame(scroll, corner_radius=12, border_width=1, border_color="#3B82F6")
+        leak_audit_card.pack(fill="x", pady=(0, 20))
+
+        ctk.CTkLabel(leak_audit_card, text="🌐 Varredura Global de Fugas (HaveIBeenPwned)", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=15, pady=(12, 2))
+        ctk.CTkLabel(
+            leak_audit_card,
+            text="Verifica todas as senhas contra mais de 800 milhões de credenciais vazadas na Dark Web usando k-Anonymity.\nNenhuma senha ou hash completo sai do teu computador.",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", padx=15, pady=(0, 10))
+
+        leak_results_frame = ctk.CTkFrame(leak_audit_card, fg_color="transparent")
+        leak_results_frame.pack(fill="x", padx=15, pady=(0, 10))
+
+        def run_full_leak_scan():
+            full_scan_btn.configure(state="disabled", text="A verificar...")
+            for w in leak_results_frame.winfo_children():
+                w.destroy()
+
+            status_lbl = ctk.CTkLabel(leak_results_frame, text="A verificar credenciais (1 a 1)...", text_color="#38BDF8")
+            status_lbl.pack(anchor="w", pady=5)
+
+            def bg_scan():
+                breached = []
+                net_error = False
+                for idx, entry in enumerate(self.entries):
+                    is_leaked, count = check_password_leak(entry.password)
+                    if count == -1:
+                        net_error = True
+                        break
+                    elif is_leaked:
+                        breached.append((entry, count))
+                    time.sleep(0.15)  # Respeita o rate limit da API
+
+                def update_results():
+                    full_scan_btn.configure(state="normal", text="🔍 Iniciar Varredura de Fugas")
+                    status_lbl.destroy()
+
+                    if net_error:
+                        ctk.CTkLabel(leak_results_frame, text="⚠️ Erro de rede: Não foi possível contactar o servidor HaveIBeenPwned.", text_color="#F59E0B").pack(anchor="w")
+                        return
+
+                    if not breached:
+                        ctk.CTkLabel(leak_results_frame, text="🎉 Excelente! Nenhuma das tuas credenciais foi encontrada em fugas públicas conhecidas.", font=ctk.CTkFont(size=12, weight="bold"), text_color="#10B981").pack(anchor="w", pady=5)
+                    else:
+                        ctk.CTkLabel(leak_results_frame, text=f"🚨 ATENÇÃO: {len(breached)} credenciais constam em fugas de dados públicas conhecidas:", font=ctk.CTkFont(size=13, weight="bold"), text_color="#EF4444").pack(anchor="w", pady=(5, 8))
+                        for b_entry, b_count in breached:
+                            row = ctk.CTkFrame(leak_results_frame, corner_radius=6)
+                            row.pack(fill="x", pady=2)
+                            ctk.CTkLabel(row, text=f"{b_entry.title} ({b_entry.username})", font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=10, pady=4)
+                            ctk.CTkLabel(row, text=f"{b_count:,} vazamentos", font=ctk.CTkFont(size=11, weight="bold"), text_color="#EF4444").pack(side="right", padx=10)
+
+                self.after(0, update_results)
+
+            threading.Thread(target=bg_scan, daemon=True).start()
+
+        full_scan_btn = ctk.CTkButton(leak_audit_card, text="🔍 Iniciar Varredura de Fugas", width=220, command=run_full_leak_scan)
+        full_scan_btn.pack(anchor="w", padx=15, pady=(0, 15))
+
+        # Alertas de Senhas Reutilizadas
         if report.reused_groups:
             ctk.CTkLabel(scroll, text="⚠️ Senhas Reutilizadas (Risco Crítico de Invasão em Cadeia)", font=ctk.CTkFont(size=15, weight="bold"), text_color="#EF4444").pack(anchor="w", pady=(15, 8))
             for pwd, elist in report.reused_groups.items():
@@ -670,6 +812,7 @@ class SecureVaultApp(ctk.CTk):
                 ctk.CTkLabel(group_box, text=f"A mesma senha é usada em {len(elist)} serviços:", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w", padx=12, pady=(8, 2))
                 ctk.CTkLabel(group_box, text=services, text_color="#38BDF8", font=ctk.CTkFont(size=13)).pack(anchor="w", padx=12, pady=(0, 8))
 
+        # Alertas de Senhas Fracas
         if report.weak_entries:
             ctk.CTkLabel(scroll, text="⚠️ Senhas Fracas (Baixa Entropia)", font=ctk.CTkFont(size=15, weight="bold"), text_color="#F59E0B").pack(anchor="w", pady=(20, 8))
             for entry in report.weak_entries:
@@ -678,11 +821,6 @@ class SecureVaultApp(ctk.CTk):
                 ctk.CTkLabel(w_box, text=entry.title, font=ctk.CTkFont(size=13, weight="bold")).pack(side="left", padx=12, pady=8)
                 entropy, rating, color = calculate_entropy(entry.password)
                 ctk.CTkLabel(w_box, text=f"{rating} ({entropy:.1f} bits)", font=ctk.CTkFont(size=12, weight="bold"), text_color=color).pack(side="right", padx=12)
-
-        if not report.reused_groups and not report.weak_entries and report.total_entries > 0:
-            good_box = ctk.CTkFrame(scroll, corner_radius=8)
-            good_box.pack(fill="x", pady=20)
-            ctk.CTkLabel(good_box, text="🎉 Parabéns! Todas as tuas senhas são fortes e exclusivas.", font=ctk.CTkFont(size=14, weight="bold"), text_color="#10B981").pack(pady=20)
 
     # -------------------------------------------------------------
     # SECÇÃO 4: GERADOR DE SENHAS
@@ -754,12 +892,41 @@ class SecureVaultApp(ctk.CTk):
 
         ctk.CTkLabel(scroll, text="⚙️ Definições e Gestão do Cofre", font=ctk.CTkFont(size=22, weight="bold")).pack(anchor="w", pady=(0, 20))
 
+        # Bloco: Auto-Lock
+        s0 = ctk.CTkFrame(scroll, corner_radius=12)
+        s0.pack(fill="x", pady=(0, 15), padx=5)
+        ctk.CTkLabel(s0, text="🔒 Bloqueio Automático por Inatividade (Auto-Lock)", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=20, pady=(15, 2))
+        ctk.CTkLabel(s0, text="Bloqueia o cofre e limpa as credenciais da memória RAM quando não utilizas a app.", text_color="gray", font=ctk.CTkFont(size=12)).pack(anchor="w", padx=20, pady=(0, 10))
+
+        lock_options_map = {
+            "1 minuto": 1,
+            "5 minutos": 5,
+            "15 minutos": 15,
+            "30 minutos": 30,
+            "Desativado": 0,
+        }
+        current_opt_text = "5 minutos"
+        for text_label, mins in lock_options_map.items():
+            if mins == self.auto_lock_minutes:
+                current_opt_text = text_label
+                break
+
+        def on_change_autolock(choice):
+            self.auto_lock_minutes = lock_options_map.get(choice, 5)
+            self.last_activity_time = time.time()
+
+        lock_menu = ctk.CTkOptionMenu(s0, values=list(lock_options_map.keys()), command=on_change_autolock, width=160)
+        lock_menu.set(current_opt_text)
+        lock_menu.pack(anchor="w", padx=20, pady=(0, 15))
+
+        # Bloco: Segurança da Palavra-passe Mestre
         s1 = ctk.CTkFrame(scroll, corner_radius=12)
         s1.pack(fill="x", pady=(0, 15), padx=5)
         ctk.CTkLabel(s1, text="Palavra-passe Mestre", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=20, pady=(15, 2))
         ctk.CTkLabel(s1, text="Altera a palavra-passe do cofre e força a geração de um novo Salt e chave Argon2id.", text_color="gray", font=ctk.CTkFont(size=12)).pack(anchor="w", padx=20, pady=(0, 10))
         ctk.CTkButton(s1, text="🔑 Alterar Palavra-passe Mestre", width=220, command=self._open_change_pwd_dialog).pack(anchor="w", padx=20, pady=(0, 15))
 
+        # Bloco: Importação e Exportação
         s2 = ctk.CTkFrame(scroll, corner_radius=12)
         s2.pack(fill="x", pady=(0, 15), padx=5)
         ctk.CTkLabel(s2, text="Importação e Exportação (CSV)", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=20, pady=(15, 2))
@@ -770,6 +937,7 @@ class SecureVaultApp(ctk.CTk):
         ctk.CTkButton(btn_row, text="📥 Importar de CSV", width=160, command=self._import_csv).pack(side="left", padx=(0, 10))
         ctk.CTkButton(btn_row, text="📤 Exportar para CSV", width=160, fg_color="transparent", border_width=1, command=self._export_csv).pack(side="left")
 
+        # Bloco: Cópia de Segurança Integral
         s3 = ctk.CTkFrame(scroll, corner_radius=12)
         s3.pack(fill="x", pady=(0, 15), padx=5)
         ctk.CTkLabel(s3, text="Cópia de Segurança Integral", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=20, pady=(15, 2))
@@ -897,13 +1065,13 @@ class SecureVaultApp(ctk.CTk):
         self.clipboard_clear_timer.daemon = True
         self.clipboard_clear_timer.start()
 
-    def _lock_vault(self):
+    def _lock_vault(self, reason: str = ""):
         self.master_password = None
         self.vault_data = None
         self.entries = []
         self.files = []
         self.selected_entry = None
-        self._show_unlock_screen()
+        self._show_unlock_screen(notice_msg=reason)
 
 
 def main():

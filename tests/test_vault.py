@@ -2,6 +2,7 @@
 Suite Completa de Testes de Segurança e Funcionalidades (test_vault.py)
 """
 
+import hashlib
 import os
 import unittest
 from vault.storage import VaultStorage
@@ -17,6 +18,7 @@ from vault.models import VaultEntry
 from vault.audit import audit_vault
 from vault.file_crypto import VaultFileAttachment
 from vault.backup import export_entries_to_csv, import_entries_from_csv, change_master_password
+from vault.pwned import check_password_leak
 
 
 class TestSecurityVault(unittest.TestCase):
@@ -100,13 +102,22 @@ class TestSecurityVault(unittest.TestCase):
         VaultStorage.create_new_vault(self.TEST_VAULT_PATH, old_pwd, data)
         change_master_password(self.TEST_VAULT_PATH, old_pwd, new_pwd)
 
-        # Deve falhar com a antiga
         with self.assertRaises(DecryptionError):
             VaultStorage.load_vault(self.TEST_VAULT_PATH, old_pwd)
 
-        # Deve abrir com a nova
         loaded = VaultStorage.load_vault(self.TEST_VAULT_PATH, new_pwd)
         self.assertEqual(loaded["vault_name"], "Teste")
+
+    def test_k_anonymity_sha1_hashing(self):
+        """Valida se o cálculo de SHA-1 e partição de prefixo/sufixo para k-Anonymity está matematicamente correto."""
+        test_pwd = "password123"
+        expected_full_sha1 = "CBFDAC6008F9CAB4083784CBD1874F76618D2A97"
+        computed_sha1 = hashlib.sha1(test_pwd.encode("utf-8")).hexdigest().upper()
+        self.assertEqual(computed_sha1, expected_full_sha1)
+        prefix = computed_sha1[:5]
+        suffix = computed_sha1[5:]
+        self.assertEqual(prefix, "CBFDA")
+        self.assertEqual(len(suffix), 35)
 
 
 if __name__ == "__main__":
