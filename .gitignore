@@ -1,0 +1,33 @@
+# Ficheiros Criptográficos e Cofres Pessoais (NUNCA enviar para o GitHub)
+*.vault
+*.vaultbackup
+*.tmp
+*.csv
+
+# Python Cache e Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Ambientes Virtuais
+venv/
+.venv/
+env/
+ENV/
+
+# Artefactos do PyInstaller e Compilação
+build/
+dist/
+*.spec
+SecureVault.exe
+
+# Ficheiros do Sistema Operativo
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
